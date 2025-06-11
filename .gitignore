@@ -1,0 +1,12 @@
+_old
+.cache
+.ssh
+.vscode-server
+.bashrc
+.cloud-locale-test.skip
+.profile
+.wget-hsts
+
+snap
+music/*
+temp/*
