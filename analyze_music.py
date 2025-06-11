@@ -18,9 +18,9 @@ TEMP_DIR    = SESSION_DIR / 'temp'
 
 # Prediction models
 MOOD_MODEL_PATH      = 'essentia_models/mood_mirex/mtg_jamendo_moodtheme-discogs-effnet-1.pb'
-GENRE_MODEL_PATH     = 'essentia_models/genre/genre_discogs400-discogs-effnet-1.pb'
+GENRE_MODEL_PATH     = 'essentia_models/genre/genre_rosamerica-discogs-effnet-1.pb'
 EMBEDDING_MODEL_PATH = 'essentia_models/discogs/discogs-effnet-bs64-1.pb'
-GENRE_LABELS_PATH    = 'essentia_models/genre/genre_discogs400-discogs-effnet-1.json'
+GENRE_LABELS_PATH    = 'essentia_models/genre/genre_rosamerica-discogs-effnet-1.json'
 
 # Load genre labels
 with open(GENRE_LABELS_PATH) as f:
@@ -50,15 +50,15 @@ for src in MUSIC_DIR.glob('*'):
         shutil.copy2(src, TEMP_DIR / src.name)
 
 
-def convert_to_wav(filepath: Path) -> Path:
+def convert_to_wav(filepath: Path, sample_rate: int = 16000) -> Path:
     """
-    Convert audio file to mono WAV at 44.1 kHz for analysis.
+    Convert audio file to mono WAV at given sample_rate for analysis.
     Returns the path to the temporary WAV file.
     """
-    wav_path = filepath.with_suffix('.temp.wav')
+    wav_path = filepath.with_suffix(f'.temp_{sample_rate}.wav')
     subprocess.run([
         'ffmpeg', '-y', '-i', str(filepath),
-        '-ac', '1', '-ar', '44100', str(wav_path)
+        '-ac', '1', '-ar', str(sample_rate), str(wav_path)
     ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     return wav_path
 
@@ -66,12 +66,16 @@ def convert_to_wav(filepath: Path) -> Path:
 def extract_features(filepath: Path):
     """
     Extract features: BPM, root key, loudness, embedding, moods, genres.
+    Uses 16 kHz WAV for all models.
     Prints top 5 genres to stdout.
     Returns a tuple:
       (bpm, root_key, moods_str, top_3_genres_str, lufs, gain)
     """
-    # Load audio signal
-    audio = MonoLoader(filename=str(filepath), sampleRate=44100)()
+    # Convert to one 16 kHz WAV file
+    wav16 = convert_to_wav(filepath, sample_rate=16000)
+
+    # Load audio for all analysis (16 kHz)
+    audio = MonoLoader(filename=str(wav16), sampleRate=16000)()
 
     # Rhythm / BPM
     bpm, *_ = RhythmExtractor2013(method='multifeature')(audio)
@@ -80,12 +84,12 @@ def extract_features(filepath: Path):
     key, scale, _ = KeyExtractor()(audio)
     root_key = f"{key} {scale}"
 
-    # Loudness measures
+    # Loudness measures (LUFS and RMS)
     gain = ReplayGain()(audio)
     lufs = gain
     rms = RMS()(audio)
 
-    # Embedding for further predictions
+    # Embedding for both mood & genre predictions
     embedder = TensorflowPredictEffnetDiscogs(
         graphFilename=EMBEDDING_MODEL_PATH,
         output='PartitionedCall:1'
@@ -95,6 +99,7 @@ def extract_features(filepath: Path):
     # Mood prediction
     mood_pred = TensorflowPredict2D(
         graphFilename=MOOD_MODEL_PATH,
+        input='model/Placeholder',
         output='model/Sigmoid'
     )(embedding).flatten()
     moods = [
@@ -107,8 +112,8 @@ def extract_features(filepath: Path):
     # Genre prediction
     genre_pred = TensorflowPredict2D(
         graphFilename=GENRE_MODEL_PATH,
-        input='serving_default_model_Placeholder',
-        output='PartitionedCall'
+        input='model/Placeholder',
+        output='model/Softmax'
     )(embedding).flatten()
     genres_sorted = sorted(
         zip(GENRE_LABELS, genre_pred),
@@ -121,6 +126,10 @@ def extract_features(filepath: Path):
 
     # Use only top 3 genres for metadata
     top_3_genres_str = ", ".join(top5_genres[:3])
+
+    # Clean up intermediate WAV file
+    if wav16.exists():
+        wav16.unlink()
 
     return (
         round(bpm),
@@ -188,15 +197,9 @@ def process_temp():
     for temp_file in TEMP_DIR.glob('*'):
         if temp_file.suffix.lower() not in ['.mp3', '.flac', '.wav']:
             continue
-
-        wav = convert_to_wav(temp_file)
-        features = extract_features(wav)
+        features = extract_features(temp_file)
         original = MUSIC_DIR / temp_file.name
         write_metadata(original, *features)
-
-        # Clean up intermediate WAV
-        if wav.exists():
-            wav.unlink()
 
 
 if __name__ == '__main__':
